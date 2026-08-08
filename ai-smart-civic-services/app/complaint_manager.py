@@ -16,7 +16,7 @@ from app.ai_service import AIService
 
 logger = logging.getLogger("complaint_manager")
 
-DEFAULT_SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.55"))
+DEFAULT_SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.35"))
 PRIORITY_ESCALATION_ORDER = {
     "Low": "Medium",
     "Medium": "High",
