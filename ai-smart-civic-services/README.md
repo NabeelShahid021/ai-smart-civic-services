@@ -1,17 +1,22 @@
-# AI Smart Civic Services - Backend API
+# AI Smart Civic Services - Backend API (v1.1.0)
 
-Production-grade, fully working FastAPI backend for **AI Smart Civic Services**, an intelligent civic complaint management system designed for Pakistani cities.
+Production-grade, fully working FastAPI backend for **AI Smart Civic Services**, an intelligent civic complaint triage, tracking, and analytics system designed for Pakistani cities.
 
-## System Overview
-Citizens can submit civic complaints (e.g. broken streetlights, garbage heaps, damaged roads, water leakage, sewer blockages, unsafe areas, dangling electric wires) in **English**, **Urdu (اردو)**, or **Roman Urdu**.
+Live deployed service: `https://ai-smart-civic-services-sd5w.onrender.com`
 
-The backend provides:
-1. **Multilingual AI Triage**: Automatic classification (`Road`, `Water/Drainage`, `Waste`, `Electricity`, `Safety`, `Other`), priority prediction (`Low`, `Medium`, `High`, `Critical`), one-sentence English summary, explainability keywords, and responsible department recommendations (e.g. WASA, TEPA/Roads Authority, LESCO/K-Electric, Waste Management).
-2. **LLM Swappable Provider with Fallback**: Primary integration via **Groq API** (`llama-3.3-70b-versatile`), automated fallback to **Google Gemini API** (`gemini-2.5-flash`), plus robust offline rule-based triage.
-3. **Local Fast Duplicate Detection & Auto-Escalation**: Powered by **scikit-learn TF-IDF + Cosine Similarity**. Automatically links duplicates and escalates the original complaint's priority (e.g., `Medium` -> `High`) to reflect multiple citizen reports.
-4. **Statistical Analytics (`GET /stats`)**: Real-time distribution by category, priority, status, average resolution time, and duplicate counts.
-5. **AI Q&A Assistant (`POST /ask`)**: Natural-language conversational query endpoint grounded on live database records and summary context.
-6. **Decoupled Frontend Ready**: Wildcard CORS (`*`) enabled for seamless external frontend integration.
+---
+
+## What This Backend Does
+1. **Multilingual AI Triage**: Categorizes complaints submitted in **English**, **Urdu (اردو)**, or **Roman Urdu** (`Road`, `Water/Drainage`, `Waste`, `Electricity`, `Safety`, `Other`), predicts priority (`Low`, `Medium`, `High`, `Critical`), generates concise summaries, explainability keywords, and assigns responsible departments (e.g. WASA, TEPA, LESCO/K-Electric, Waste Management).
+2. **Citizen Tracking (`GET /track`)**: Unauthenticated endpoint allowing citizens to track their complaint by `complaint_id` or view all their submitted complaints by `phone`.
+3. **Optional Citizen Metadata**: Citizen `phone`, GPS coordinates (`latitude`, `longitude`), and external `image_url` for photographic evidence.
+4. **Duplicate Detection & Auto-Escalation**: Powered by **scikit-learn TF-IDF & Cosine Similarity**. Automatically links duplicate complaints and escalates the original complaint priority to expedite resolution.
+5. **Lightweight Admin Authentication**:
+   - `ADMIN_PASSWORD` environment variable.
+   - `POST /admin/login` returns a secure Bearer token.
+   - Protects `PATCH /complaints/{complaint_id}`, `GET /stats`, and `GET /complaints`.
+6. **Citizen AI Assistant (`POST /ask`)**: Answers questions with grounding on citizen-specific complaints (`phone` or `complaint_id`) or general municipal workflows.
+7. **CORS Enabled (`*`)**: Built to connect with separate frontend clients on any domain.
 
 ---
 
@@ -20,74 +25,39 @@ The backend provides:
 ai-smart-civic-services/
 ├── app/
 │   ├── __init__.py           # Application package
-│   ├── main.py               # FastAPI app, route definitions, CORS, error handling
-│   ├── database.py           # DatabaseManager class (SQLite setup, session handling)
-│   ├── models.py             # SQLAlchemy ORM models + Pydantic schemas
-│   ├── ai_service.py         # AIService class (Groq/Gemini, parsing, retries, fallback)
-│   ├── complaint_manager.py  # ComplaintManager class (CRUD, TF-IDF duplicate detection & escalation)
-│   └── stats_service.py      # StatsService class (aggregation & statistical logic)
+│   ├── main.py               # FastAPI app, routes, auth middleware, CORS (*), exception handlers
+│   ├── database.py           # DatabaseManager class (SQLite connection, schema migration, session handling)
+│   ├── models.py             # SQLAlchemy ORM models + Pydantic schemas (with phone, lat, lng, image_url, auth)
+│   ├── ai_service.py         # AIService class (Groq / Gemini fallback, parsing, retries, intelligent triage)
+│   ├── complaint_manager.py  # ComplaintManager class (CRUD, phone queries, TF-IDF duplicate detection & escalation)
+│   └── stats_service.py      # StatsService class (aggregation & citizen context summarization)
 ├── requirements.txt          # Pinned production dependencies
 ├── .env.example              # Environment variables template
 ├── .env                      # Local environment configuration
 ├── render.yaml               # Zero-configuration Render Web Service specification
 ├── run.py                    # Convenience local server runner
+├── test_system.py            # Comprehensive automated test suite
 └── README.md                 # Complete documentation & deployment guide
 ```
 
 ---
 
-## Quick Start (Local Setup)
+## API Endpoints Reference
 
-### 1. Prerequisites
-- Python 3.11+
-- Git
+### 1. Citizen Endpoints (Public — No Login Required)
 
-### 2. Installation
-Clone the repository and install dependencies:
-```bash
-git clone <your-repo-url>
-cd ai-smart-civic-services
-pip install -r requirements.txt
-```
-
-### 3. Environment Configuration
-Copy `.env.example` to `.env` and provide either your `GROQ_API_KEY` or `GEMINI_API_KEY`:
-```bash
-cp .env.example .env
-```
-Edit `.env`:
-```ini
-GROQ_API_KEY=your_groq_api_key_here
-GEMINI_API_KEY=your_gemini_api_key_here
-GROQ_MODEL=llama-3.3-70b-versatile
-GEMINI_MODEL=gemini-2.5-flash
-DATABASE_URL=sqlite:///./civic_services.db
-SIMILARITY_THRESHOLD=0.6
-```
-
-### 4. Running the Server
-Run with Uvicorn:
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-Or use the runner:
-```bash
-python run.py
-```
-Open **Interactive Swagger API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-
----
-
-## REST API Endpoints
-
-### 1. `POST /submit-complaint`
-Submits a new complaint for AI triage and duplicate check.
+#### `POST /submit-complaint`
+Submit a new complaint with optional phone, GPS coordinates, and image URL.
 
 **Request Body:**
 ```json
 {
-  "description": "Hamare mohallay mein pichlay 4 din se paani ki main pipeline phati hui hai aur ganda paani sadak par khara hai.",
-  "location": "Sector G-9/2, Islamabad"
+  "description": "Massive pothole and broken road on Main Boulevard Gulberg causing severe traffic jams.",
+  "location": "Main Boulevard, Gulberg, Lahore",
+  "phone": "03001234567",
+  "latitude": 31.5204,
+  "longitude": 74.3587,
+  "image_url": "https://civic-cdn.example.com/photos/road_pothole_gulberg.jpg"
 }
 ```
 
@@ -95,15 +65,19 @@ Submits a new complaint for AI triage and duplicate check.
 ```json
 {
   "complaint_id": 1,
-  "description": "Hamare mohallay mein pichlay 4 din se paani ki main pipeline phati hui hai aur ganda paani sadak par khara hai.",
-  "category": "Water/Drainage",
+  "description": "Massive pothole and broken road on Main Boulevard Gulberg causing severe traffic jams.",
+  "category": "Road",
   "priority": "High",
-  "location": "Sector G-9/2, Islamabad",
-  "date_submitted": "2026-08-08T18:25:00.123456",
+  "location": "Main Boulevard, Gulberg, Lahore",
+  "phone": "03001234567",
+  "latitude": 31.5204,
+  "longitude": 74.3587,
+  "image_url": "https://civic-cdn.example.com/photos/road_pothole_gulberg.jpg",
+  "date_submitted": "2026-08-08T19:38:28.925008",
   "status": "Open",
-  "assigned_department": "WASA",
-  "ai_summary": "Main water pipeline burst causing sewage accumulation on road for 4 days.",
-  "ai_keywords": ["pipeline burst", "paani", "drainage", "water leak"],
+  "assigned_department": "Roads Authority / TEPA",
+  "ai_summary": "Road maintenance issue reported: Massive pothole and broken road on Main Boulevard Gulberg causing severe traffic jams.",
+  "ai_keywords": ["pothole", "road damage", "sadak"],
   "duplicate_of": null,
   "resolved_at": null
 }
@@ -111,117 +85,133 @@ Submits a new complaint for AI triage and duplicate check.
 
 ---
 
-### 2. `GET /complaints`
-Query and filter complaints with multiple criteria.
+#### `GET /track`
+Citizen tracking endpoint by either `complaint_id` or `phone`.
 
-**Query Parameters (Optional):**
-- `category`: `Road`, `Water/Drainage`, `Waste`, `Electricity`, `Safety`, `Other`
-- `priority`: `Low`, `Medium`, `High`, `Critical`
-- `status`: `Open`, `Assigned`, `In Progress`, `Resolved`
-- `department`: e.g. `WASA`, `Roads Authority`
-- `location`: keyword search
-- `date_from`, `date_to`: ISO format datetime
+- **By Complaint ID**: `GET /track?complaint_id=1`
+  Returns the single complaint object (`ComplaintResponse`), or 404 if not found.
+- **By Phone Number**: `GET /track?phone=03001234567`
+  Returns an array of all complaints submitted by that phone number (`List[ComplaintResponse]`), ordered newest first.
 
 ---
 
-### 3. `GET /complaints/{complaint_id}`
-Fetch single complaint by ID with full AI classification details.
+#### `GET /complaints/{complaint_id}`
+Public lookup for a single complaint's details and AI triage output.
 
 ---
 
-### 4. `PATCH /complaints/{complaint_id}`
-Update complaint status or assigned department. If marked as `Resolved`, `resolved_at` is automatically set to the current UTC timestamp.
+#### `POST /ask`
+Citizen and operator AI Assistant.
+
+**Request Body:**
+```json
+{
+  "question": "What is the status of my road repair complaint?",
+  "complaint_id": 1
+}
+```
+*(Or provide `"phone": "03001234567"` to ground on all user complaints, or omit both for general municipal inquiries).*
+
+**Response (200 OK):**
+```json
+{
+  "question": "What is the status of my road repair complaint?",
+  "answer": "Your complaint #1 regarding Road maintenance on Main Boulevard, Gulberg is currently Open and assigned to Roads Authority / TEPA."
+}
+```
+
+---
+
+### 2. Admin Endpoints (Protected — Requires Bearer Token)
+
+#### `POST /admin/login`
+Authenticate with the shared `ADMIN_PASSWORD`.
+
+**Request Body:**
+```json
+{
+  "password": "your_admin_password"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "token": "admin_token_6pkxz0lt..."
+}
+```
+*(If password does not match, returns 401 Unauthorized).*
+
+---
+
+#### `PATCH /complaints/{complaint_id}`
+**Headers:** `Authorization: Bearer <admin_token>`
+Update complaint status or assigned department. If status is set to `Resolved`, `resolved_at` is timestamped automatically.
 
 **Request Body:**
 ```json
 {
   "status": "Resolved",
-  "assigned_department": "WASA Emergency Team"
+  "assigned_department": "TEPA Rapid Repair Unit"
 }
 ```
 
 ---
 
-### 5. `GET /stats`
-Returns aggregated analytics across the complaint database.
-
-**Response (200 OK):**
+#### `GET /stats`
+**Headers:** `Authorization: Bearer <admin_token>`
+Returns system aggregate analytics:
 ```json
 {
-  "total_complaints": 4,
+  "total_complaints": 3,
   "by_category": {
     "Road": 1,
-    "Water/Drainage": 2,
-    "Waste": 0,
-    "Electricity": 1,
+    "Water/Drainage": 1,
+    "Waste": 1,
+    "Electricity": 0,
     "Safety": 0,
     "Other": 0
   },
   "by_priority": {
     "Low": 0,
-    "Medium": 1,
+    "Medium": 0,
     "High": 2,
     "Critical": 1
   },
   "by_status": {
-    "Open": 3,
+    "Open": 2,
     "Assigned": 0,
     "In Progress": 0,
     "Resolved": 1
   },
-  "avg_resolution_time_hours": 1.25,
-  "duplicate_count": 1
+  "avg_resolution_time_hours": 0.0,
+  "duplicate_count": 0
 }
 ```
 
 ---
 
-### 6. `POST /ask`
-Natural language Q&A assistant grounded on live database records and summary context.
-
-**Request Body:**
-```json
-{
-  "question": "How many water and drainage complaints are currently active?"
-}
-```
-
-**Response (200 OK):**
-```json
-{
-  "question": "How many water and drainage complaints are currently active?",
-  "answer": "Currently, there are 2 Water/Drainage complaints registered in the system, with 1 Open and 1 Resolved."
-}
-```
+#### `GET /complaints`
+**Headers:** `Authorization: Bearer <admin_token>`
+Filtered list of all complaints for admin portal with optional filters: `category`, `priority`, `status`, `department`, `location`, `phone`, `date_from`, `date_to`.
 
 ---
 
-## Render Deployment Instructions
+## Render Deployment Settings
 
-### Method 1: Deploy with `render.yaml` (Blueprint)
-1. Push this repository to GitHub or GitLab.
-2. Log into [Render.com](https://render.com).
-3. Click **New +** -> **Blueprint**.
-4. Connect your repository. Render will automatically detect `render.yaml`.
-5. Under Environment Variables, supply your `GEMINI_API_KEY` and/or `GROQ_API_KEY`.
-6. Click **Apply**.
-
-### Method 2: Manual Web Service Setup on Render
-1. Click **New +** -> **Web Service**.
-2. Connect your repo.
-3. Configure the following settings:
-   - **Name**: `ai-smart-civic-services`
-   - **Environment**: `Python 3`
-   - **Region**: Any (e.g., Oregon)
-   - **Branch**: `main`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. Add Environment Variables:
-   - `GEMINI_API_KEY`: `your_gemini_api_key`
-   - `GROQ_API_KEY`: `your_groq_api_key` (optional)
+1. **Environment Variables on Render**:
+   - `ADMIN_PASSWORD`: `<your-admin-password>` (e.g. `civic_admin_2026`)
+   - `GEMINI_API_KEY`: Google Gemini API Key
+   - `GROQ_API_KEY`: *(Optional)* Groq API Key
+   - `DATABASE_URL`: `sqlite:///./civic_services.db`
+   - `SIMILARITY_THRESHOLD`: `0.55`
    - `PYTHON_VERSION`: `3.11.9`
-5. Click **Create Web Service**.
 
-Your live public API base URL will be:
-`https://ai-smart-civic-services.onrender.com`
-(Interactive Swagger Docs available at `https://ai-smart-civic-services.onrender.com/docs`).
+2. **Start Command**:
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port $PORT
+   ```
+
+3. **Public Base URL**:
+   `https://ai-smart-civic-services-sd5w.onrender.com`
+   (Swagger UI available at `/docs`).

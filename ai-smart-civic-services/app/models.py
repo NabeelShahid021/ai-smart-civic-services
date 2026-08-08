@@ -1,11 +1,12 @@
 """
 SQLAlchemy ORM models and Pydantic schemas for AI Smart Civic Services.
+Includes Citizen model, Complaint model, and all request/response schemas.
 """
 from datetime import datetime
 import json
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -15,15 +16,32 @@ VALID_PRIORITIES = ["Low", "Medium", "High", "Critical"]
 VALID_STATUSES = ["Open", "Assigned", "In Progress", "Resolved"]
 
 
+class Citizen(Base):
+    """SQLAlchemy model for citizen accounts."""
+    __tablename__ = "citizens"
+
+    citizen_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    cnic = Column(String(20), unique=True, index=True, nullable=False)  # Normalized 13 digits
+    password_hash = Column(String(255), nullable=False)
+    name = Column(String(100), nullable=True)
+    phone = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Complaint(Base):
     """SQLAlchemy model for citizen complaints."""
     __tablename__ = "complaints"
 
     complaint_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    citizen_id = Column(Integer, ForeignKey("citizens.citizen_id"), nullable=True, index=True)
     description = Column(Text, nullable=False)
     category = Column(String(50), nullable=False, default="Other")
     priority = Column(String(20), nullable=False, default="Medium")
     location = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True, index=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    image_url = Column(Text, nullable=True)
     date_submitted = Column(DateTime, default=datetime.utcnow, nullable=False)
     status = Column(String(30), default="Open", nullable=False)
     assigned_department = Column(String(100), nullable=True)
@@ -57,12 +75,49 @@ class Complaint(Base):
 
 
 # ==========================================
-# Pydantic Request / Response Schemas
+# Citizen Authentication Schemas
+# ==========================================
+
+class CitizenSignupRequest(BaseModel):
+    cnic: str = Field(..., description="13-digit Pakistani CNIC with or without dashes (e.g. 12345-1234567-1 or 1234512345671)")
+    password: str = Field(..., min_length=4, description="Citizen account password")
+    name: Optional[str] = Field(None, description="Optional citizen full name")
+    phone: Optional[str] = Field(None, description="Optional citizen contact number")
+
+
+class CitizenLoginRequest(BaseModel):
+    cnic: str = Field(..., description="13-digit Pakistani CNIC")
+    password: str = Field(..., description="Citizen account password")
+
+
+class CitizenAuthResponse(BaseModel):
+    token: str = Field(..., description="Citizen JWT Bearer authentication token")
+    citizen_id: int = Field(..., description="Unique citizen ID")
+
+
+# ==========================================
+# Admin Schemas
+# ==========================================
+
+class AdminLoginRequest(BaseModel):
+    password: str = Field(..., description="Shared admin password")
+
+
+class AdminLoginResponse(BaseModel):
+    token: str = Field(..., description="Bearer authentication token for admin requests")
+
+
+# ==========================================
+# Complaint Request / Response Schemas
 # ==========================================
 
 class ComplaintCreate(BaseModel):
     description: str = Field(..., min_length=3, description="Citizen complaint in English, Urdu, or Roman Urdu")
     location: Optional[str] = Field(None, description="Optional street, block, neighborhood, or area")
+    phone: Optional[str] = Field(None, description="Optional citizen phone number for tracking")
+    latitude: Optional[float] = Field(None, description="Optional GPS latitude")
+    longitude: Optional[float] = Field(None, description="Optional GPS longitude")
+    image_url: Optional[str] = Field(None, description="Optional externally hosted image URL")
 
     @field_validator("description")
     def description_not_empty(cls, v: str) -> str:
@@ -90,10 +145,15 @@ class ComplaintUpdate(BaseModel):
 
 class ComplaintResponse(BaseModel):
     complaint_id: int
+    citizen_id: Optional[int] = None
     description: str
     category: str
     priority: str
     location: Optional[str] = None
+    phone: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    image_url: Optional[str] = None
     date_submitted: datetime
     status: str
     assigned_department: Optional[str] = None
@@ -109,10 +169,15 @@ class ComplaintResponse(BaseModel):
     def from_orm_model(cls, obj: Complaint) -> "ComplaintResponse":
         return cls(
             complaint_id=obj.complaint_id,
+            citizen_id=obj.citizen_id,
             description=obj.description,
             category=obj.category,
             priority=obj.priority,
             location=obj.location,
+            phone=obj.phone,
+            latitude=obj.latitude,
+            longitude=obj.longitude,
+            image_url=obj.image_url,
             date_submitted=obj.date_submitted,
             status=obj.status,
             assigned_department=obj.assigned_department,
@@ -133,7 +198,9 @@ class StatsResponse(BaseModel):
 
 
 class AskQuestionRequest(BaseModel):
-    question: str = Field(..., min_length=2, description="Natural language question about civic complaints")
+    question: str = Field(..., min_length=2, description="Natural language question about civic complaints or procedures")
+    phone: Optional[str] = Field(None, description="Optional citizen phone number to ground answer on their complaints")
+    complaint_id: Optional[int] = Field(None, description="Optional complaint ID to ground answer on a specific complaint")
 
     @field_validator("question")
     def question_not_empty(cls, v: str) -> str:

@@ -5,7 +5,6 @@ average resolution time, duplicate counting, and database summary generation for
 """
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from app.models import (
     Complaint,
     VALID_CATEGORIES,
@@ -76,41 +75,70 @@ class StatsService:
             "duplicate_count": duplicate_count,
         }
 
-    def get_context_summary(self, db: Session) -> str:
+    def get_context_summary(
+        self,
+        db: Session,
+        phone: Optional[str] = None,
+        complaint_id: Optional[int] = None,
+    ) -> str:
         """
-        Builds a comprehensive textual snapshot of database metrics and recent complaints
-        to supply as grounded context for the AI /ask endpoint.
+        Builds a comprehensive textual snapshot of database metrics and relevant complaints
+        to supply as grounded context for the AI /ask assistant.
         """
+        lines = []
+
+        # 1. Citizen-specific complaint context by ID
+        if complaint_id:
+            c = db.query(Complaint).filter(Complaint.complaint_id == complaint_id).first()
+            if c:
+                lines.append(f"TARGET CITIZEN COMPLAINT #{c.complaint_id}:")
+                lines.append(f"- Status: {c.status}")
+                lines.append(f"- Category: {c.category} | Priority: {c.priority}")
+                lines.append(f"- Assigned Department: {c.assigned_department or 'Under Triage'}")
+                lines.append(f"- Location: {c.location or 'Not specified'}")
+                lines.append(f"- Submitted Date: {c.date_submitted.isoformat()}")
+                if c.resolved_at:
+                    lines.append(f"- Resolved At: {c.resolved_at.isoformat()}")
+                lines.append(f"- AI Summary: {c.ai_summary or c.description}")
+                if c.duplicate_of:
+                    lines.append(f"- Note: This is linked as a duplicate of original Complaint #{c.duplicate_of}")
+                lines.append("")
+            else:
+                lines.append(f"CITIZEN QUERY NOTICE: No complaint found matching ID #{complaint_id}.")
+                lines.append("")
+
+        # 2. Citizen-specific complaints by Phone Number
+        if phone:
+            clean_phone = phone.strip()
+            user_complaints = (
+                db.query(Complaint)
+                .filter(Complaint.phone.ilike(f"%{clean_phone}%"))
+                .order_by(Complaint.date_submitted.desc())
+                .all()
+            )
+            if user_complaints:
+                lines.append(f"CITIZEN TRACKED COMPLAINTS (Phone: {clean_phone}):")
+                for c in user_complaints:
+                    lines.append(
+                        f"• #{c.complaint_id} | Status: {c.status} | Category: {c.category} | Dept: {c.assigned_department} | Date: {c.date_submitted.strftime('%Y-%m-%d')}"
+                    )
+                    lines.append(f"  Summary: {c.ai_summary}")
+                lines.append("")
+            else:
+                lines.append(f"CITIZEN TRACKED COMPLAINTS: No complaints currently on record for phone {clean_phone}.")
+                lines.append("")
+
+        # 3. Overall municipal stats and process knowledge
         stats = self.get_stats(db)
-        recent_complaints = (
-            db.query(Complaint)
-            .order_by(Complaint.date_submitted.desc())
-            .limit(20)
-            .all()
-        )
-
-        lines = [
-            f"SYSTEM AGGREGATE SUMMARY:",
-            f"- Total Complaints Logged: {stats['total_complaints']}",
-            f"- Complaints by Category: {stats['by_category']}",
-            f"- Complaints by Priority: {stats['by_priority']}",
-            f"- Complaints by Status: {stats['by_status']}",
-            f"- Average Resolution Time (Hours): {stats['avg_resolution_time_hours'] if stats['avg_resolution_time_hours'] is not None else 'N/A (No complaints resolved yet)'}",
-            f"- Total Linked Duplicates: {stats['duplicate_count']}",
-            "",
-            "RECENT COMPLAINTS DETAIL:",
-        ]
-
-        if not recent_complaints:
-            lines.append("No complaints currently submitted in the database.")
-        else:
-            for idx, c in enumerate(recent_complaints, 1):
-                loc = f", Location: {c.location}" if c.location else ""
-                dup = f", Duplicate of #{c.duplicate_of}" if c.duplicate_of else ""
-                lines.append(
-                    f"#{c.complaint_id} | Category: {c.category} | Priority: {c.priority} | Status: {c.status} | Dept: {c.assigned_department}{loc}{dup}"
-                )
-                lines.append(f"   Summary: {c.ai_summary}")
-                lines.append(f"   Keywords: {c.keywords_list}")
+        lines.extend([
+            "CIVIC SERVICES SYSTEM KNOWLEDGE & MUNICIPAL OVERVIEW:",
+            "- Categories: Road (Potholes, broken roads, TEPA), Water/Drainage (Burst pipes, sewer blockage, WASA), Waste (Garbage heaps, sanitation, Waste Management), Electricity (Fallen wires, transformer hazard, LESCO/K-Electric), Safety (Street crime, dark spots, Police), Other (General municipal services).",
+            "- How citizens submit: Via the mobile/web portal in English, Urdu, or Roman Urdu with optional photo URL, phone, and GPS coordinates.",
+            "- Duplicate Detection: Automatic priority escalation upon multiple citizen reports for faster emergency dispatch.",
+            f"- Total Complaints in System: {stats['total_complaints']}",
+            f"- Category Breakdown: {stats['by_category']}",
+            f"- Status Breakdown: {stats['by_status']}",
+            f"- Average Resolution Time: {stats['avg_resolution_time_hours'] if stats['avg_resolution_time_hours'] is not None else 'N/A'} hours",
+        ])
 
         return "\n".join(lines)

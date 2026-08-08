@@ -13,7 +13,11 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: ADMIN_PASSWORD
+        value: "civic_admin_2026"
+      - key: CITIZEN_JWT_SECRET
+        generateValue: true
       - key: DATABASE_URL
         value: sqlite:///./civic_services.db
       - key: SIMILARITY_THRESHOLD
-        value: "0.6"
+        value: "0.55"

@@ -1,6 +1,6 @@
 """
 ComplaintManager class for AI Smart Civic Services.
-Handles business logic: complaint creation, LLM triage coordination,
+Handles business logic: complaint creation, citizen linkage, LLM triage coordination,
 TF-IDF + cosine similarity duplicate detection, priority escalation, querying, and updating.
 """
 import os
@@ -51,7 +51,6 @@ class ComplaintManager:
         if not tokens1 or not tokens2:
             return True
         common = tokens1.intersection(tokens2)
-        # If any significant area/sector/street matches
         return len(common) > 0
 
     def detect_duplicate_and_escalate(
@@ -119,12 +118,17 @@ class ComplaintManager:
 
         return None, None, 0.0
 
-    def create_complaint(self, data: ComplaintCreate, db: Session) -> Complaint:
+    def create_complaint(
+        self,
+        data: ComplaintCreate,
+        db: Session,
+        citizen_id: Optional[int] = None,
+    ) -> Complaint:
         """
         Submits a citizen complaint:
         1. Calls AIService.analyze() for category, priority, summary, keywords, and department
         2. Executes TF-IDF duplicate detection & priority escalation on original
-        3. Persists new complaint to SQLite DB and returns it
+        3. Persists new complaint to SQLite DB (linked to citizen_id) and returns it
         """
         # Step 1: AI Triage
         ai_result: Dict[str, Any] = self.ai_service.analyze(data.description)
@@ -143,12 +147,21 @@ class ComplaintManager:
             db=db,
         )
 
+        # Clean optional strings
+        clean_phone = data.phone.strip() if data.phone and data.phone.strip() else None
+        clean_image_url = data.image_url.strip() if data.image_url and data.image_url.strip() else None
+
         # Step 3: Create & Save Model
         new_complaint = Complaint(
+            citizen_id=citizen_id,
             description=data.description,
             category=category,
             priority=priority,
             location=data.location,
+            phone=clean_phone,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            image_url=clean_image_url,
             date_submitted=datetime.utcnow(),
             status="Open",
             assigned_department=department,
@@ -171,12 +184,16 @@ class ComplaintManager:
         status: Optional[str] = None,
         department: Optional[str] = None,
         location: Optional[str] = None,
+        phone: Optional[str] = None,
+        citizen_id: Optional[int] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
     ) -> List[Complaint]:
         """Query and filter complaints, ordered newest first."""
         query = db.query(Complaint)
 
+        if citizen_id:
+            query = query.filter(Complaint.citizen_id == citizen_id)
         if category:
             query = query.filter(Complaint.category.ilike(f"%{category.strip()}%"))
         if priority:
@@ -187,6 +204,8 @@ class ComplaintManager:
             query = query.filter(Complaint.assigned_department.ilike(f"%{department.strip()}%"))
         if location:
             query = query.filter(Complaint.location.ilike(f"%{location.strip()}%"))
+        if phone:
+            query = query.filter(Complaint.phone.ilike(f"%{phone.strip()}%"))
         if date_from:
             query = query.filter(Complaint.date_submitted >= date_from)
         if date_to:
@@ -194,9 +213,28 @@ class ComplaintManager:
 
         return query.order_by(Complaint.date_submitted.desc()).all()
 
+    def get_complaints_by_citizen(self, citizen_id: int, db: Session) -> List[Complaint]:
+        """Fetch all complaints submitted by a specific authenticated citizen, newest first."""
+        return (
+            db.query(Complaint)
+            .filter(Complaint.citizen_id == citizen_id)
+            .order_by(Complaint.date_submitted.desc())
+            .all()
+        )
+
     def get_complaint_by_id(self, complaint_id: int, db: Session) -> Optional[Complaint]:
         """Fetch a single complaint by its primary key ID."""
         return db.query(Complaint).filter(Complaint.complaint_id == complaint_id).first()
+
+    def get_complaints_by_phone(self, phone: str, db: Session) -> List[Complaint]:
+        """Fetch all complaints submitted under a specific citizen phone number, newest first."""
+        clean_phone = phone.strip()
+        return (
+            db.query(Complaint)
+            .filter(Complaint.phone.ilike(f"%{clean_phone}%"))
+            .order_by(Complaint.date_submitted.desc())
+            .all()
+        )
 
     def update_complaint(self, complaint_id: int, update_data: ComplaintUpdate, db: Session) -> Optional[Complaint]:
         """
