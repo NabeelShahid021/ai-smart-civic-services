@@ -1,18 +1,18 @@
 """
-AIService class for AI Smart Civic Services.
-Handles LLM triage, categorization, priority prediction, multilingual parsing (English, Urdu, Roman Urdu),
-and natural language Q&A with Groq/Gemini provider fallback, retry logic, and high-accuracy offline fallback.
+AI Service for AI Smart Civic Services.
+Handles multilingual LLM triage (Kimi / Groq / Gemini / local intelligent engine), structured JSON extraction,
+explainability keyword generation, department recommendation, and natural conversational AI Assistant queries.
 """
 import os
-import re
 import json
+import re
 import logging
 from typing import Dict, Any, List, Optional
 import httpx
 
 logger = logging.getLogger("ai_service")
-logging.basicConfig(level=logging.INFO)
 
+# Core triage system prompt matching hackathon specifications
 SYSTEM_PROMPT = """You are a civic complaint triage assistant for a Pakistani city.
 Input can be in English, Urdu, or Roman Urdu — handle all three fluently.
 
@@ -25,78 +25,92 @@ Given a citizen complaint, return ONLY valid JSON (no markdown, no explanation o
   "department": "responsible department, e.g. WASA, Roads Authority, Electricity Board, Waste Management"
 }"""
 
-SAFE_FALLBACK: Dict[str, Any] = {
-    "category": "Other",
-    "priority": "Medium",
-    "summary": "Requires manual review — AI classification failed",
-    "keywords": [],
-    "department": "General Services",
+ASSISTANT_SYSTEM_PROMPT = """You are the AI Civic Assistant for 'AI Smart Civic Services' in Pakistan.
+You are a warm, helpful, natural, and intelligent conversational assistant.
+
+Instructions:
+1. Answer the user's question directly, clearly, and conversationally in plain text.
+2. If asked about numbers, counts, or complaint status (e.g., "How many water leakage complaints are open?"), calculate the exact count from the DATABASE CONTEXT and state it clearly (e.g., "There is currently 1 open Water/Drainage complaint...").
+3. Do NOT dump raw database context, python dictionaries, or technical keys. Present information naturally.
+4. Support English, Urdu (اردو), and Roman Urdu fluently."""
+
+CATEGORY_KEYWORDS = {
+    "Road": ["road", "pothole", "sadak", "gaddha", "cracked", "asphalt", "traffic", "accident", "flyover", "sarak", "street", "footpath"],
+    "Water/Drainage": ["water", "leak", "pipe", "paani", "drainage", "gutter", "gatar", "sewage", "sewer", "nalah", "overflow", "supply", "wasa", "tanker"],
+    "Waste": ["garbage", "trash", "kachra", "dustbin", "waste", "filth", "badbu", "smell", "dump", "safai", "kuda", "debris"],
+    "Electricity": ["electricity", "power", "wire", "taar", "pole", "khamba", "light", "spark", "transformer", "load shedding", "voltage", "current", "bijli", "lesco", "kelectric"],
+    "Safety": ["safety", "dark", "crime", "theft", "harassment", "danger", "hazard", "khatra", "open manhole", "unsafe", "threat", "police"],
 }
 
-VALID_CATEGORIES = ["Road", "Water/Drainage", "Waste", "Electricity", "Safety", "Other"]
-VALID_PRIORITIES = ["Low", "Medium", "High", "Critical"]
+DEPARTMENT_MAP = {
+    "Road": "Roads Authority / TEPA",
+    "Water/Drainage": "WASA (Water & Sanitation Agency)",
+    "Waste": "Solid Waste Management Company (LWMC/SWMC)",
+    "Electricity": "Electricity Distribution Board (LESCO/K-Electric)",
+    "Safety": "Municipal Enforcement & Police",
+    "Other": "General Municipal Services",
+}
 
 
 class AIService:
-    """Encapsulates all AI and LLM operations with provider fallback, strict JSON validation, and retries."""
+    """Provides LLM triage, structured JSON normalization, and conversational AI Assistant."""
 
-    def __init__(self, groq_api_key: Optional[str] = None, gemini_api_key: Optional[str] = None):
-        self.groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY", "").strip()
-        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "").strip()
-        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-
-    def _normalize_category(self, cat: str) -> str:
-        """Normalize category string variations to exact valid schema values."""
-        if not cat or not isinstance(cat, str):
-            return "Other"
-        cat_clean = cat.strip()
-        for valid in VALID_CATEGORIES:
-            if valid.lower() == cat_clean.lower() or valid.replace("/", "-").lower() == cat_clean.lower():
-                return valid
-
-        cat_lower = cat_clean.lower()
-        if "water" in cat_lower or "drain" in cat_lower or "sewer" in cat_lower or "paani" in cat_lower or "pipeline" in cat_lower:
-            return "Water/Drainage"
-        if "waste" in cat_lower or "garbage" in cat_lower or "trash" in cat_lower or "kachra" in cat_lower:
-            return "Waste"
-        if "electr" in cat_lower or "power" in cat_lower or "wire" in cat_lower or "bijli" in cat_lower:
-            return "Electricity"
-        if "safe" in cat_lower or "crime" in cat_lower or "danger" in cat_lower or "khatra" in cat_lower:
-            return "Safety"
-        if "road" in cat_lower or "street" in cat_lower or "pothole" in cat_lower or "sadak" in cat_lower:
-            return "Road"
-        return "Other"
-
-    def _normalize_priority(self, prio: str) -> str:
-        """Normalize priority string variations."""
-        if not prio or not isinstance(prio, str):
-            return "Medium"
-        prio_lower = prio.lower().strip()
-        if "crit" in prio_lower or "urg" in prio_lower or "emergency" in prio_lower:
-            return "Critical"
-        if "high" in prio_lower:
-            return "High"
-        if "low" in prio_lower:
-            return "Low"
-        if "med" in prio_lower:
-            return "Medium"
-        for valid in VALID_PRIORITIES:
-            if valid.lower() == prio_lower:
-                return valid
-        return "Medium"
+    def __init__(self):
+        self.kimi_endpoint = os.getenv("KIMI_ENDPOINT_URL", "https://nabeeljarwar022--ep-kimi-k3-server.us-west.modal.direct").strip()
+        self.kimi_token = os.getenv("KIMI_TOKEN", "wk-salPREHeuXzO1ki8SLXq3.ws-uWOYFM4oxQGgjJbHSzvUjh").strip()
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 
     def _clean_json_string(self, raw_text: str) -> str:
-        """Extract clean JSON substring from potential LLM markdown codeblocks or conversational text."""
+        """Strip markdown fences, leading/trailing commentary, and isolate valid JSON."""
+        if not raw_text:
+            return ""
         text = raw_text.strip()
-        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
-        if fence_match:
-            return fence_match.group(1).strip()
-        start_idx = text.find("{")
-        end_idx = text.rfind("}")
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            return text[start_idx : end_idx + 1].strip()
-        return text
+        if "```json" in text:
+            text = text.split("```json", 1)[1]
+            if "```" in text:
+                text = text.split("```", 1)[0]
+        elif "```" in text:
+            text = text.split("```", 1)[1]
+            if "```" in text:
+                text = text.split("```", 1)[0]
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return text.strip()
+
+    def _call_kimi(self, prompt: str, system: str = SYSTEM_PROMPT) -> Optional[str]:
+        """Execute chat completion using Kimi K3 on Modal."""
+        if not self.kimi_endpoint or not self.kimi_token:
+            return None
+        url = self.kimi_endpoint.rstrip("/")
+        if not url.endswith("/v1/chat/completions") and not url.endswith("/chat/completions"):
+            url = f"{url}/v1/chat/completions"
+
+        headers = {
+            "Authorization": f"Bearer {self.kimi_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                res = client.post(url, headers=headers, json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data["choices"][0]["message"]["content"]
+                logger.warning(f"Kimi API returned status {res.status_code}: {res.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Kimi API call exception: {e}")
+        return None
 
     def _call_groq(self, prompt: str, system: str = SYSTEM_PROMPT) -> Optional[str]:
         """Execute chat completion using Groq API."""
@@ -113,11 +127,13 @@ class AIService:
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
         }
+        if "return ONLY valid JSON" in system:
+            payload["response_format"] = {"type": "json_object"}
+
         try:
-            with httpx.Client(timeout=6.0) as client:
+            with httpx.Client(timeout=7.0) as client:
                 res = client.post(url, headers=headers, json=payload)
                 if res.status_code == 200:
                     data = res.json()
@@ -135,23 +151,26 @@ class AIService:
         models_to_try = [self.gemini_model, "gemini-2.0-flash-lite"]
         for model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
-            headers = {"Content-Type": "application/json"}
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.gemini_api_key,
+            }
             payload = {
                 "contents": [
                     {
                         "role": "user",
                         "parts": [
-                            {"text": f"SYSTEM INSTRUCTION:\n{system}\n\nUSER COMPLAINT / QUERY:\n{prompt}"}
+                            {"text": f"SYSTEM INSTRUCTION:\n{system}\n\nUSER PROMPT / QUERY:\n{prompt}"}
                         ],
                     }
                 ],
                 "generationConfig": {
-                    "temperature": 0.1,
+                    "temperature": 0.2,
                     "responseMimeType": "application/json" if "return ONLY valid JSON" in system else "text/plain",
                 },
             }
             try:
-                with httpx.Client(timeout=5.0) as client:
+                with httpx.Client(timeout=6.0) as client:
                     res = client.post(url, headers=headers, json=payload)
                     if res.status_code == 200:
                         data = res.json()
@@ -161,8 +180,7 @@ class AIService:
                             if parts:
                                 return parts[0].get("text", "")
                     elif res.status_code == 429:
-                        logger.warning("Gemini API rate limit (429) hit. Gracefully falling back to local intelligence.")
-                        return None
+                        logger.warning(f"Gemini API ({model}) rate limit (429) hit.")
                     else:
                         logger.warning(f"Gemini API ({model}) returned status {res.status_code}")
             except Exception as e:
@@ -170,7 +188,11 @@ class AIService:
         return None
 
     def _call_llm(self, prompt: str, system: str = SYSTEM_PROMPT) -> Optional[str]:
-        """Call Groq first, then fallback to Gemini."""
+        """Try Kimi on Modal -> Groq -> Gemini -> fallback."""
+        if self.kimi_endpoint and self.kimi_token:
+            resp = self._call_kimi(prompt, system)
+            if resp:
+                return resp
         if self.groq_api_key:
             resp = self._call_groq(prompt, system)
             if resp:
@@ -181,90 +203,99 @@ class AIService:
                 return resp
         return None
 
+    def _normalize_category(self, cat_str: str) -> str:
+        """Ensure category is strictly one of the 6 allowed values."""
+        allowed = ["Road", "Water/Drainage", "Waste", "Electricity", "Safety", "Other"]
+        clean = (cat_str or "").strip().lower()
+        if "road" in clean or "street" in clean or "pothole" in clean or "sadak" in clean:
+            return "Road"
+        if "water" in clean or "drain" in clean or "gutter" in clean or "sewer" in clean or "pipe" in clean:
+            return "Water/Drainage"
+        if "waste" in clean or "garbage" in clean or "trash" in clean or "kachra" in clean:
+            return "Waste"
+        if "electr" in clean or "wire" in clean or "power" in clean or "taar" in clean or "pole" in clean:
+            return "Electricity"
+        if "safe" in clean or "danger" in clean or "crime" in clean or "hazard" in clean:
+            return "Safety"
+        for a in allowed:
+            if a.lower() == clean:
+                return a
+        return "Other"
+
+    def _normalize_priority(self, prio_str: str) -> str:
+        """Ensure priority is strictly one of the 4 allowed values."""
+        allowed = ["Low", "Medium", "High", "Critical"]
+        clean = (prio_str or "").strip().lower()
+        for a in allowed:
+            if a.lower() == clean:
+                return a
+        if "crit" in clean or "urgent" in clean or "emergency" in clean:
+            return "Critical"
+        if "high" in clean or "severe" in clean:
+            return "High"
+        if "low" in clean or "minor" in clean:
+            return "Low"
+        return "Medium"
+
     def _rule_based_fallback(self, text: str) -> Dict[str, Any]:
-        """High-accuracy multilingual rule-based classifier (English, Urdu script, Roman Urdu)."""
-        t = text.lower()
+        """High-accuracy fallback classification engine for English, Urdu, and Roman Urdu."""
+        lower = text.lower()
+        scores: Dict[str, int] = {cat: 0 for cat in CATEGORY_KEYWORDS}
+        matched_keywords: List[str] = []
 
-        # 1. Electricity / Power hazard
-        # Urdu words: بجلی, تار, کرنٹ, ٹرانسفارمر
-        if any(k in t for k in ["بجلی", "تار", "کرنٹ", "ٹرانسفارمر", "bijli", "taar", "tar ", "current", "spark", "transformer", "wire", "voltage", "electric", "pole"]):
-            is_crit = any(u in t for u in ["ٹوٹ", "گر", "خطرہ", "shock", "fell", "spark", "khatra", "danger", "down", "gir", "toot"])
-            return {
-                "category": "Electricity",
-                "priority": "Critical" if is_crit else "High",
-                "summary": f"Electrical hazard reported: {text[:100]}",
-                "keywords": ["electricity hazard", "wires", "bijli"],
-                "department": "Electricity Board (LESCO/K-Electric)",
-            }
+        for cat, kws in CATEGORY_KEYWORDS.items():
+            for kw in kws:
+                if kw in lower:
+                    scores[cat] += 1
+                    if kw not in matched_keywords and len(matched_keywords) < 4:
+                        matched_keywords.append(kw)
 
-        # 2. Water / Drainage / Sewerage
-        # Urdu words: پانی, پائپ, گٹر, سیوریج, نالی
-        if any(k in t for k in ["پانی", "پائپ", "گٹر", "سیوریج", "نالی", "paani", "pani", "water", "pipe", "pipeline", "drain", "drainage", "sewer", "gutar", "nali", "overflow", "leak"]):
-            is_high = any(u in t for u in ["din", "days", "ganda", "flooding", "phati", "burst", "severe", "khara"])
-            return {
-                "category": "Water/Drainage",
-                "priority": "High" if is_high else "Medium",
-                "summary": f"Water supply or drainage issue reported: {text[:100]}",
-                "keywords": ["pipeline burst", "paani", "drainage"],
-                "department": "WASA",
-            }
+        best_cat = max(scores, key=scores.get)
+        if scores[best_cat] == 0:
+            best_cat = "Other"
+            matched_keywords = ["civic", "issue"]
 
-        # 3. Waste / Garbage / Sanitation
-        # Urdu words: کچرا, کوڑا, صفائی, بدبو
-        if any(k in t for k in ["کچرا", "کوڑا", "صفائی", "بدبو", "kachra", "kura", "garbage", "trash", "waste", "safai", "smell", "badboo", "dumper", "litter"]):
-            return {
-                "category": "Waste",
-                "priority": "Medium",
-                "summary": f"Garbage accumulation and sanitation request: {text[:100]}",
-                "keywords": ["waste accumulation", "garbage", "kachra"],
-                "department": "Waste Management Company (LWMC/SSWMB)",
-            }
+        critical_markers = ["spark", "fire", "aag", "urgent", "danger", "khatra", "emergency", "current", "hazard", "burst", "blocked hospital"]
+        high_markers = ["overflow", "broken", "toota", "accident", "smell", "dark", "no power", "leakage", "phati"]
 
-        # 4. Public Safety / Crime / Danger
-        # Urdu words: چوری, خطرہ, ڈکیتی, اندھیرا, غیر محفوظ
-        if any(k in t for k in ["چوری", "خطرہ", "ڈکیتی", "اندھیرا", "غیر محفوظ", "crime", "safety", "robbery", "dark", "unsafe", "chori", "khatra", "danger", "security"]):
-            return {
-                "category": "Safety",
-                "priority": "High",
-                "summary": f"Public safety concern reported: {text[:100]}",
-                "keywords": ["safety hazard", "crime prevention", "khatra"],
-                "department": "City Safety & Police",
-            }
+        if any(m in lower for m in critical_markers):
+            priority = "Critical"
+        elif any(m in lower for m in high_markers):
+            priority = "High"
+        elif len(text.strip()) < 30:
+            priority = "Low"
+        else:
+            priority = "Medium"
 
-        # 5. Road / Pothole / Street damage
-        # Urdu words: سڑک, گڑھا, کھڈا, ٹوٹ پھوٹ
-        if any(k in t for k in ["سڑک", "گڑھا", "کھڈا", "ٹوٹی", "road", "pothole", "sadak", "gaddha", "khadda", "street damage", "asphalt", "crater"]):
-            is_high = any(u in t for u in ["massive", "severe", "traffic", "vehicle damage", "danger", "kharnak", "jam"])
-            return {
-                "category": "Road",
-                "priority": "High" if is_high else "Medium",
-                "summary": f"Road maintenance issue reported: {text[:100]}",
-                "keywords": ["pothole", "road damage", "sadak"],
-                "department": "Roads Authority / TEPA",
-            }
+        snippet = text.strip().replace("\n", " ")
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        summary = f"Citizen reported {best_cat.lower()} issue: {snippet}"
 
-        return SAFE_FALLBACK.copy()
+        return {
+            "category": best_cat,
+            "priority": priority,
+            "summary": summary,
+            "keywords": matched_keywords if matched_keywords else [best_cat.lower()],
+            "department": DEPARTMENT_MAP.get(best_cat, "General Services"),
+        }
 
     def analyze(self, text: str) -> Dict[str, Any]:
-        """
-        Analyze a citizen complaint in English, Urdu, or Roman Urdu.
-        Returns parsed JSON dict matching the schema. Retries once if JSON is invalid.
-        Falls back gracefully if LLM is unavailable.
-        """
-        if not text or not text.strip():
-            return SAFE_FALLBACK.copy()
+        """Triage a complaint description and return structured JSON dictionary."""
+        prompt = f"CITIZEN COMPLAINT TEXT:\n{text.strip()}"
+        raw_output = self._call_llm(prompt=prompt, system=SYSTEM_PROMPT)
 
         parsed_data = None
-        raw_output = self._call_llm(prompt=text, system=SYSTEM_PROMPT)
-
         if raw_output:
             try:
                 cleaned = self._clean_json_string(raw_output)
                 parsed_data = json.loads(cleaned)
             except Exception as e:
-                logger.warning(f"Initial JSON parse failed: {e}. Retrying with strict instruction...")
-                retry_system = SYSTEM_PROMPT + "\n\nCRITICAL: Respond with valid JSON only. Do not output anything else."
-                retry_output = self._call_llm(prompt=text, system=retry_system)
+                logger.warning(f"First JSON parse attempt failed: {e}. Retrying...")
+                retry_output = self._call_llm(
+                    prompt=f"Previous response was not valid JSON. Please return ONLY raw valid JSON for:\n{text.strip()}",
+                    system=SYSTEM_PROMPT,
+                )
                 if retry_output:
                     try:
                         cleaned_retry = self._clean_json_string(retry_output)
@@ -299,29 +330,195 @@ class AIService:
             except Exception as validation_err:
                 logger.error(f"Error normalizing LLM response: {validation_err}")
 
-        # Intelligent multilingual rule-based fallback
+        # Fallback
         logger.info("Using multilingual rule-based fallback for complaint classification.")
         return self._rule_based_fallback(text)
 
+    def _generate_smart_contextual_answer(self, question: str, context: str) -> str:
+        """
+        Intelligently interprets the question and database context to generate
+        a clean, human-like, conversational answer without dumping raw technical records.
+        """
+        q = question.lower().strip()
+
+        # 1. Check for targeted complaint #ID in question or context
+        is_specific_complaint_query = ("#" in q or "status of my" in q or "my complaint" in q or "complaint #" in q or "update on" in q)
+        if is_specific_complaint_query and "TARGET CITIZEN COMPLAINT #" in context:
+            cid_match = re.search(r"TARGET CITIZEN COMPLAINT #(\d+):", context)
+            status_match = re.search(r"- Status:\s*([^\n]+)", context)
+            cat_match = re.search(r"- Category:\s*([^\n|]+)", context)
+            prio_match = re.search(r"Priority:\s*([^\n]+)", context)
+            dept_match = re.search(r"- Assigned Department:\s*([^\n]+)", context)
+            loc_match = re.search(r"- Location:\s*([^\n]+)", context)
+            sum_match = re.search(r"- AI Summary:\s*([^\n]+)", context)
+
+            cid = cid_match.group(1) if cid_match else "N/A"
+            cstatus = status_match.group(1).strip() if status_match else "Open"
+            ccat = cat_match.group(1).strip() if cat_match else "General"
+            cprio = prio_match.group(1).strip() if prio_match else "Medium"
+            cdept = dept_match.group(1).strip() if dept_match else "General Services"
+            cloc = loc_match.group(1).strip() if loc_match else "Not specified"
+            csum = sum_match.group(1).strip() if sum_match else ""
+
+            return (
+                f"📋 **Status for Complaint #{cid}:**\n"
+                f"- **Current Status**: **{cstatus}**\n"
+                f"- **Category & Urgency**: {ccat} ({cprio} Priority)\n"
+                f"- **Assigned Department**: {cdept}\n"
+                f"- **Location**: {cloc}\n"
+                f"{f'- **Summary**: {csum}' if csum else ''}\n\n"
+                f"You can monitor live progress on the Public Tracker page at any time!"
+            )
+
+        # 2. Greetings & Pleasantries
+        greetings = ["hi", "hello", "salam", "assalam", "hey", "aoa", "good morning", "good evening", "adaab"]
+        if any(q.startswith(g) or q == g for g in greetings):
+            return (
+                "Walaykum Assalam! I'm your AI Civic Assistant. How can I help you today? "
+                "You can ask me how many complaints are open, which department handles a specific issue (like WASA or TEPA), "
+                "check your complaint status, or ask how to file a new report."
+            )
+
+        # 3. Extract Category counts from context
+        category_counts = {
+            "Water/Drainage": 0,
+            "Road": 0,
+            "Waste": 0,
+            "Electricity": 0,
+            "Safety": 0,
+            "Other": 0,
+        }
+        total_complaints = 0
+        open_count = 0
+        resolved_count = 0
+
+        # Parse Category Breakdown
+        cat_breakdown_match = re.search(r"Category Breakdown:\s*(\{.*?\})", context)
+        if cat_breakdown_match:
+            try:
+                raw_dict = eval(cat_breakdown_match.group(1))
+                if isinstance(raw_dict, dict):
+                    for k, v in raw_dict.items():
+                        category_counts[k] = int(v)
+            except Exception:
+                pass
+
+        # Parse Status Breakdown
+        stat_breakdown_match = re.search(r"Status Breakdown:\s*(\{.*?\})", context)
+        if stat_breakdown_match:
+            try:
+                raw_dict = eval(stat_breakdown_match.group(1))
+                if isinstance(raw_dict, dict):
+                    open_count = int(raw_dict.get("Open", 0)) + int(raw_dict.get("Assigned", 0)) + int(raw_dict.get("In Progress", 0))
+                    resolved_count = int(raw_dict.get("Resolved", 0))
+            except Exception:
+                pass
+
+        # Parse Total Complaints
+        tot_match = re.search(r"Total Complaints in System:\s*(\d+)", context)
+        if tot_match:
+            total_complaints = int(tot_match.group(1))
+
+        # 4. Question: Specific Category Count (e.g. "How many water leakage complaints...")
+        if any(w in q for w in ["water", "drainage", "pipe", "paani", "leak", "gutter", "wasa"]):
+            count = category_counts.get("Water/Drainage", 0)
+            if count == 0:
+                return "There are currently **no Water/Drainage complaints** registered in the system."
+            elif count == 1:
+                return f"There is currently **1 Water/Drainage complaint** registered in the system (assigned to WASA)."
+            else:
+                return f"There are currently **{count} Water/Drainage complaints** registered in the system (managed by WASA)."
+
+        if any(w in q for w in ["road", "pothole", "sadak", "sarak", "tepa"]):
+            count = category_counts.get("Road", 0)
+            if count == 0:
+                return "There are currently **no Road complaints** in the system."
+            elif count == 1:
+                return f"There is currently **1 Road complaint** in the system (routed to the Roads Authority / TEPA)."
+            else:
+                return f"There are currently **{count} Road & Infrastructure complaints** in the system (routed to the Roads Authority / TEPA)."
+
+        if any(w in q for w in ["electricity", "wire", "taar", "power", "bijli", "lesco", "kelectric"]):
+            count = category_counts.get("Electricity", 0)
+            if count == 0:
+                return "There are currently **no Electricity complaints** in the system."
+            elif count == 1:
+                return f"There is currently **1 Electricity complaint** in the system (routed to the Electricity Board)."
+            else:
+                return f"There are currently **{count} Electricity & Power complaints** in the system (routed to the Electricity Board)."
+
+        if any(w in q for w in ["garbage", "waste", "kachra", "trash", "safai"]):
+            count = category_counts.get("Waste", 0)
+            if count == 0:
+                return "There are currently **no Waste Management complaints** in the system."
+            elif count == 1:
+                return f"There is currently **1 Waste Management complaint** in the system (routed to Solid Waste Management)."
+            else:
+                return f"There are currently **{count} Waste Management complaints** in the system (routed to Solid Waste Management)."
+
+        # 5. Question: Total / Open Complaints
+        if "how many" in q or "total complaints" in q or "kitni complaints" in q or "open complaints" in q:
+            return (
+                f"📊 **Current System Summary:**\n"
+                f"- **Total Complaints**: {total_complaints}\n"
+                f"- **Active / Open**: {open_count}\n"
+                f"- **Resolved**: {resolved_count}\n"
+                f"- **Water/Drainage**: {category_counts['Water/Drainage']} | **Roads**: {category_counts['Road']} | **Electricity**: {category_counts['Electricity']} | **Waste**: {category_counts['Waste']}"
+            )
+
+        # 6. Question: Department Inquiries ("Which department handles...")
+        if any(w in q for w in ["which department", "kaunsa department", "who fixes", "who handles", "department"]):
+            if any(w in q for w in ["water", "pipe", "drainage", "gutter", "leak", "sewer"]):
+                return "💧 **WASA (Water and Sanitation Agency)** handles all water leakages, pipeline bursts, sewer blockages, and drainage issues."
+            if any(w in q for w in ["road", "pothole", "sadak", "street"]):
+                return "🛣️ **TEPA / Roads Authority** is responsible for repairing potholes, broken roads, damaged footpaths, and road infrastructure."
+            if any(w in q for w in ["electric", "wire", "taar", "power", "bijli", "transformer"]):
+                return "⚡ **LESCO / K-Electric / Electricity Board** handles exposed power cables, transformer repairs, broken electricity poles, and load hazards."
+            if any(w in q for w in ["garbage", "trash", "kachra", "safai"]):
+                return "🗑️ **Solid Waste Management Company (LWMC/SWMC)** manages garbage disposal, overflowing trash bins, and street cleaning."
+
+        # 7. Question: How to File / CNIC / Tracking
+        if any(w in q for w in ["how to", "file", "submit", "register", "tariqa"]):
+            return (
+                "📝 **How to File a Civic Complaint:**\n"
+                "1. **Sign In**: Click 'Sign in' on the top-right and enter your 13-digit Pakistani CNIC.\n"
+                "2. **Describe Problem**: Type the issue in English, Urdu (اردو), or Roman Urdu.\n"
+                "3. **Add Location & Photo**: Pin your GPS location and attach an evidence photo.\n"
+                "4. **AI Triage**: Our engine immediately categorizes the issue and alerts the responsible department!"
+            )
+
+        if "track" in q or "tracking" in q:
+            return (
+                "🔍 **How to Track Your Complaint:**\n"
+                "Click on **'Public Tracker'** in the top navigation and enter your **Complaint ID** or your **phone number** to view live progress from submission to resolution!"
+            )
+
+        # 8. General Knowledge / Intelligent conversational response
+        return (
+            f"I'm here to assist you with AI Smart Civic Services across Pakistani cities. "
+            f"Our system currently tracks {total_complaints} complaints with automated triage, department dispatch, and duplicate escalation. "
+            f"Please feel free to ask about specific complaint statuses, municipal departments (WASA, TEPA, LESCO), or how to file a new report."
+        )
+
     def answer_question(self, question: str, context: str) -> str:
         """
-        Answer a natural language question about current civic complaints using provided summary context.
+        Answer any natural language question naturally and conversationally,
+        grounding responses in the civic system and live database context.
         """
-        system = """You are the AI Assistant for the 'AI Smart Civic Services' complaint management system in Pakistan.
-Given the current database context summary and statistics, answer the user's natural language question accurately, concisely, and professionally in plain text.
-If the context does not contain enough data, answer based on the available metrics and provide helpful civic assistance."""
+        user_content = (
+            f"SYSTEM KNOWLEDGE & CURRENT CIVIC DATABASE CONTEXT:\n{context}\n\n"
+            f"USER INQUIRY / QUESTION:\n{question}\n\n"
+            f"NATURAL CONVERSATIONAL RESPONSE:"
+        )
 
-        user_content = f"DATABASE CONTEXT & STATISTICS:\n{context}\n\nCITIZEN/OPERATOR QUESTION:\n{question}\n\nANSWER (plain text):"
-
-        resp = self._call_llm(prompt=user_content, system=system)
+        resp = self._call_llm(prompt=user_content, system=ASSISTANT_SYSTEM_PROMPT)
         if resp and resp.strip():
             clean_resp = resp.strip()
             if clean_resp.startswith("```") and clean_resp.endswith("```"):
                 clean_resp = "\n".join(clean_resp.split("\n")[1:-1]).strip()
-            return clean_resp
+            # If LLM returned a robotic echo or empty text, use smart fallback
+            if len(clean_resp) > 5 and not clean_resp.startswith("SYSTEM KNOWLEDGE:"):
+                return clean_resp
 
-        # Intelligent contextual plain-text answer
-        return (
-            f"Based on current municipal records:\n{context}\n\n"
-            f"Regarding '{question}': The system has cataloged these civic issues with priority triage and department assignments."
-        )
+        # Use the intelligent, human-like contextual answer generator
+        return self._generate_smart_contextual_answer(question=question, context=context)
