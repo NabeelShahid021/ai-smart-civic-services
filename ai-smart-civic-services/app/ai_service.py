@@ -26,11 +26,11 @@ Given a citizen complaint, return ONLY valid JSON (no markdown, no explanation o
 }"""
 
 ASSISTANT_SYSTEM_PROMPT = """You are the official AI Civic Assistant for 'Pak Civic Pulse' in Pakistan.
-You are a professional, polite, and intelligent municipal assistant.
+You are a warm, intelligent, helpful, and natural conversational AI.
 
 Scope & Guidelines:
-1. FOCUS ON CIVIC SERVICES: You are dedicated to helping citizens and municipal operators with Pakistani civic issues, complaints, and municipal departments (WASA, TEPA, LESCO/K-Electric, LWMC/SWMC).
-2. IRRELEVANT / OFF-TOPIC QUERIES: If a user asks something unrelated to civic/municipal services (e.g. food, restaurants, movies, sports, gossip):
+1. FOCUS ON CIVIC SERVICES: You are dedicated to helping citizens with Pakistani civic issues, complaints, and municipal departments (WASA, TEPA, LESCO/K-Electric, LWMC/SWMC).
+2. IRRELEVANT / OFF-TOPIC QUERIES: If a user asks something unrelated to civic/municipal services (e.g. food, restaurants, movies, sports):
    - Politely state that you are specialized in civic and municipal services for Pakistani cities.
    - Summarize what you can help with (reporting issues, live complaint stats, department routing, tracking status).
 3. CIVIC & SYSTEM INQUIRIES: When the user asks about civic problems or Pak Civic Pulse:
@@ -39,7 +39,7 @@ Scope & Guidelines:
    - Guide citizens accurately on departments: WASA (Water & Sanitation), TEPA / Roads Authority (Potholes & Roads), LESCO / K-Electric (Electricity & Power), and LWMC / SWMC (Solid Waste Management).
    - Explain how citizens can file complaints with CNIC, pin GPS location, and attach photos.
 4. CLEAN & CONVERSATIONAL: Always respond in natural, friendly markdown or plain text. Never dump raw Python dictionaries, technical logs, or JSON.
-5. Support English, Urdu (اردو), and Roman Urdu fluently and respectfully."""
+5. Support English, Urdu (اردو), and Roman Urdu (e.g. 'pani ka masla kon dekhta ha', 'bijli kahan report karein') fluently and respectfully."""
 
 CATEGORY_KEYWORDS = {
     "Road": ["road", "pothole", "sadak", "gaddha", "cracked", "asphalt", "traffic", "accident", "flyover", "sarak", "street", "footpath"],
@@ -109,7 +109,7 @@ class AIService:
             "temperature": 0.2,
         }
         try:
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=2.5) as client:
                 res = client.post(url, headers=headers, json=payload)
                 if res.status_code == 200:
                     data = res.json()
@@ -344,49 +344,48 @@ class AIService:
     def _generate_smart_contextual_answer(self, question: str, context: str) -> str:
         """
         Intelligently interprets the question and database context to generate
-        a clean, human-like, conversational answer with professional civic focus.
+        a clean, human-like, conversational answer with natural multilingual Pakistani phrasing.
         """
         q = question.lower().strip()
 
         # -------------------------------------------------------------
-        # 1. Check for Department Inquiries (PRIORITY OVER COUNTS)
-        # e.g., "Kaunsa department bijli ke tootay taar dekhta hai?", "Who fixes water pipes?"
+        # 1. Parse Database Context Counts & Totals
         # -------------------------------------------------------------
-        is_dept_inquiry = any(
-            w in q
-            for w in [
-                "which department",
-                "kaunsa department",
-                "kaun si agency",
-                "who fixes",
-                "who handles",
-                "who is responsible",
-                "kisko report karein",
-                "kis department",
-                "department",
-                "zimedar",
-                "responsible",
-            ]
-        )
-        if is_dept_inquiry:
-            if any(w in q for w in ["electric", "wire", "taar", "power", "bijli", "transformer", "pole", "khamba", "light"]):
-                return "⚡ **LESCO / K-Electric / Electricity Distribution Board** handles exposed power cables, broken wires, transformer repairs, broken electricity poles, and electrical load hazards."
-            if any(w in q for w in ["water", "pipe", "drainage", "gutter", "leak", "sewer", "paani", "nalah"]):
-                return "💧 **WASA (Water and Sanitation Agency)** handles all water supply leakages, pipeline bursts, sewer overflows, and drainage blockages across Pakistani cities."
-            if any(w in q for w in ["road", "pothole", "sadak", "street", "footpath", "sarak", "gaddha"]):
-                return "🛣️ **TEPA / Roads Authority** is responsible for repairing road potholes, broken asphalt, damaged footpaths, and traffic infrastructure."
-            if any(w in q for w in ["garbage", "trash", "kachra", "safai", "waste", "dustbin"]):
-                return "🗑️ **Solid Waste Management Company (LWMC / SWMC)** manages garbage disposal, overflowing trash bins, and street sanitation."
-            if any(w in q for w in ["safety", "crime", "dark", "harassment", "police", "khatra"]):
-                return "🛡️ **Municipal Enforcement & Police** handles public safety hazards, dark street spots, and neighborhood security concerns."
-            return (
-                "🏛️ **Municipal Department Routing on Pak Civic Pulse:**\n"
-                "- 💧 **WASA**: Water pipe leaks, sewer overflows, drainage\n"
-                "- 🛣️ **Roads Authority / TEPA**: Potholes, broken roads, footpaths\n"
-                "- ⚡ **LESCO / K-Electric**: Exposed wires, transformers, streetlights\n"
-                "- 🗑️ **Waste Management (LWMC)**: Garbage heaps, sanitation\n"
-                "- 🛡️ **Municipal Enforcement**: Public safety & open hazards"
-            )
+        category_counts = {
+            "Water/Drainage": 0,
+            "Road": 0,
+            "Waste": 0,
+            "Electricity": 0,
+            "Safety": 0,
+            "Other": 0,
+        }
+        total_complaints = 0
+        open_count = 0
+        resolved_count = 0
+
+        cat_breakdown_match = re.search(r"Category Breakdown:\s*(\{.*?\})", context)
+        if cat_breakdown_match:
+            try:
+                raw_dict = eval(cat_breakdown_match.group(1))
+                if isinstance(raw_dict, dict):
+                    for k, v in raw_dict.items():
+                        category_counts[k] = int(v)
+            except Exception:
+                pass
+
+        stat_breakdown_match = re.search(r"Status Breakdown:\s*(\{.*?\})", context)
+        if stat_breakdown_match:
+            try:
+                raw_dict = eval(stat_breakdown_match.group(1))
+                if isinstance(raw_dict, dict):
+                    open_count = int(raw_dict.get("Open", 0)) + int(raw_dict.get("Assigned", 0)) + int(raw_dict.get("In Progress", 0))
+                    resolved_count = int(raw_dict.get("Resolved", 0))
+            except Exception:
+                pass
+
+        tot_match = re.search(r"Total Complaints in System:\s*(\d+)", context)
+        if tot_match:
+            total_complaints = int(tot_match.group(1))
 
         # -------------------------------------------------------------
         # 2. Check for Specific Targeted Complaint #ID Query
@@ -431,54 +430,17 @@ class AIService:
             )
 
         # -------------------------------------------------------------
-        # 4. Extract Category counts and totals from context
+        # 4. Count Intent Check (how many, kitne, total, open count)
         # -------------------------------------------------------------
-        category_counts = {
-            "Water/Drainage": 0,
-            "Road": 0,
-            "Waste": 0,
-            "Electricity": 0,
-            "Safety": 0,
-            "Other": 0,
-        }
-        total_complaints = 0
-        open_count = 0
-        resolved_count = 0
-
-        # Parse Category Breakdown
-        cat_breakdown_match = re.search(r"Category Breakdown:\s*(\{.*?\})", context)
-        if cat_breakdown_match:
-            try:
-                raw_dict = eval(cat_breakdown_match.group(1))
-                if isinstance(raw_dict, dict):
-                    for k, v in raw_dict.items():
-                        category_counts[k] = int(v)
-            except Exception:
-                pass
-
-        # Parse Status Breakdown
-        stat_breakdown_match = re.search(r"Status Breakdown:\s*(\{.*?\})", context)
-        if stat_breakdown_match:
-            try:
-                raw_dict = eval(stat_breakdown_match.group(1))
-                if isinstance(raw_dict, dict):
-                    open_count = int(raw_dict.get("Open", 0)) + int(raw_dict.get("Assigned", 0)) + int(raw_dict.get("In Progress", 0))
-                    resolved_count = int(raw_dict.get("Resolved", 0))
-            except Exception:
-                pass
-
-        # Parse Total Complaints
-        tot_match = re.search(r"Total Complaints in System:\s*(\d+)", context)
-        if tot_match:
-            total_complaints = int(tot_match.group(1))
+        is_count_query = any(cw in q for cw in ["how many", "kitne", "kitni", "count", "number of", "total", "open complaints", "system stats"])
 
         # -------------------------------------------------------------
-        # 5. Category-Specific Count Inquiries
+        # 5. WATER & SEWERAGE INQUIRIES (WASA)
+        # Matches: "pani ka masla kon dekhta ha", "water leak", "gutter", "wasa"
         # -------------------------------------------------------------
-        is_count_query = any(cw in q for cw in ["how many", "kitne", "kitni", "count", "number of", "total", "open"])
-
-        if is_count_query:
-            if any(w in q for w in ["water", "drainage", "pipe", "paani", "leak", "gutter", "wasa"]):
+        has_water_topic = any(w in q for w in ["water", "pani", "paani", "drainage", "pipe", "leak", "gutter", "gatar", "sewer", "sewage", "nalah", "nalka", "wasa"])
+        if has_water_topic:
+            if is_count_query:
                 count = category_counts.get("Water/Drainage", 0)
                 if count == 0:
                     return "There are currently **no Water/Drainage complaints** registered in the system."
@@ -486,17 +448,20 @@ class AIService:
                     return f"There is currently **1 Water/Drainage complaint** registered in the system (assigned to WASA)."
                 else:
                     return f"There are currently **{count} Water/Drainage complaints** registered in the system (managed by WASA)."
+            # Department / Issue guidance
+            return (
+                "💧 **WASA (Water and Sanitation Agency)** handles all water supply issues, pipeline leaks/bursts, "
+                "gutter overflows, and sewer blockages in your city. "
+                "You can submit a complaint on the homepage with a photo and GPS location to have it dispatched directly to WASA!"
+            )
 
-            if any(w in q for w in ["road", "pothole", "sadak", "sarak", "tepa", "gaddha"]):
-                count = category_counts.get("Road", 0)
-                if count == 0:
-                    return "There are currently **no Road complaints** in the system."
-                elif count == 1:
-                    return f"There is currently **1 Road complaint** in the system (routed to the Roads Authority / TEPA)."
-                else:
-                    return f"There are currently **{count} Road & Infrastructure complaints** in the system (routed to the Roads Authority / TEPA)."
-
-            if any(w in q for w in ["electricity", "wire", "taar", "power", "bijli", "lesco", "kelectric"]):
+        # -------------------------------------------------------------
+        # 6. ELECTRICITY & POWER INQUIRIES (LESCO / K-Electric)
+        # Matches: "bijli ke taar kon theek karega", "electricity", "transformer", "lesco"
+        # -------------------------------------------------------------
+        has_electric_topic = any(w in q for w in ["electricity", "power", "wire", "taar", "tar", "pole", "khamba", "light", "spark", "transformer", "load shedding", "voltage", "current", "bijli", "lesco", "kelectric"])
+        if has_electric_topic:
+            if is_count_query:
                 count = category_counts.get("Electricity", 0)
                 if count == 0:
                     return "There are currently **no Electricity complaints** in the system."
@@ -504,8 +469,38 @@ class AIService:
                     return f"There is currently **1 Electricity complaint** in the system (routed to the Electricity Board)."
                 else:
                     return f"There are currently **{count} Electricity & Power complaints** in the system (routed to the Electricity Board)."
+            return (
+                "⚡ **LESCO / K-Electric / Electricity Distribution Board** is responsible for repairing dangling power wires, "
+                "broken electricity poles, transformer hazards, and streetlight issues. "
+                "Report it via the homepage form for urgent AI triage!"
+            )
 
-            if any(w in q for w in ["garbage", "waste", "kachra", "trash", "safai"]):
+        # -------------------------------------------------------------
+        # 7. ROADS & POTHOLES INQUIRIES (TEPA / Roads Authority)
+        # Matches: "sarak tooti hui ha", "potholes", "road", "footpath", "tepa"
+        # -------------------------------------------------------------
+        has_road_topic = any(w in q for w in ["road", "pothole", "sadak", "sarak", "gaddha", "gadha", "cracked", "asphalt", "traffic", "flyover", "street", "footpath", "tepa", "toota", "tooti"])
+        if has_road_topic:
+            if is_count_query:
+                count = category_counts.get("Road", 0)
+                if count == 0:
+                    return "There are currently **no Road complaints** in the system."
+                elif count == 1:
+                    return f"There is currently **1 Road complaint** in the system (routed to the Roads Authority / TEPA)."
+                else:
+                    return f"There are currently **{count} Road & Infrastructure complaints** in the system (routed to the Roads Authority / TEPA)."
+            return (
+                "🛣️ **TEPA / Roads Authority** manages road repairs, pothole patching, asphalt recarpeting, and broken footpaths. "
+                "You can report road hazards directly on Pak Civic Pulse to notify TEPA dispatchers."
+            )
+
+        # -------------------------------------------------------------
+        # 8. WASTE & SANITATION INQUIRIES (LWMC / SWMC)
+        # Matches: "kachra kahan dalein", "garbage", "trash", "safai", "lwmc"
+        # -------------------------------------------------------------
+        has_waste_topic = any(w in q for w in ["garbage", "trash", "kachra", "dustbin", "waste", "filth", "badbu", "smell", "dump", "safai", "kuda", "debris", "lwmc", "swmc"])
+        if has_waste_topic:
+            if is_count_query:
                 count = category_counts.get("Waste", 0)
                 if count == 0:
                     return "There are currently **no Waste Management complaints** in the system."
@@ -513,8 +508,15 @@ class AIService:
                     return f"There is currently **1 Waste Management complaint** in the system (routed to Solid Waste Management)."
                 else:
                     return f"There are currently **{count} Waste Management complaints** in the system (routed to Solid Waste Management)."
+            return (
+                "🗑️ **Solid Waste Management Company (LWMC / SWMC)** is responsible for garbage collection, overflowing waste containers, "
+                "and neighborhood street sweeping. File a report with a photo to alert your local sanitation team."
+            )
 
-            # Total / System summary
+        # -------------------------------------------------------------
+        # 9. Total / System Summary Counts
+        # -------------------------------------------------------------
+        if is_count_query:
             return (
                 f"📊 **Current System Summary (Pak Civic Pulse):**\n"
                 f"- **Total Complaints**: {total_complaints}\n"
@@ -524,9 +526,22 @@ class AIService:
             )
 
         # -------------------------------------------------------------
-        # 6. Question: How to File / CNIC / Tracking / System Purpose
+        # 10. General Department Overview
         # -------------------------------------------------------------
-        if any(w in q for w in ["how to", "file", "submit", "register", "tariqa", "kaise karun"]):
+        if any(w in q for w in ["department", "kon dekhta", "kon sambhalta", "zimedar", "agency", "departments"]):
+            return (
+                "🏛️ **Municipal Department Routing on Pak Civic Pulse:**\n"
+                "- 💧 **WASA**: Water pipeline leaks, sewer overflows, drainage blockages\n"
+                "- 🛣️ **Roads Authority / TEPA**: Potholes, broken roads, footpaths\n"
+                "- ⚡ **LESCO / K-Electric**: Exposed wires, transformers, streetlights\n"
+                "- 🗑️ **Waste Management (LWMC)**: Garbage heaps, trash cleaning\n"
+                "- 🛡️ **Municipal Enforcement & Police**: Public safety & open hazards"
+            )
+
+        # -------------------------------------------------------------
+        # 11. Question: How to File / CNIC / Tracking / System Purpose
+        # -------------------------------------------------------------
+        if any(w in q for w in ["how to", "file", "submit", "register", "tariqa", "kaise karun", "kaise karein"]):
             return (
                 "📝 **How to File a Civic Complaint on Pak Civic Pulse:**\n"
                 "1. **Sign In**: Click 'Sign in' on the top-right and enter your 13-digit Pakistani CNIC.\n"
@@ -552,7 +567,7 @@ class AIService:
             )
 
         # -------------------------------------------------------------
-        # 7. Professional Out-of-Scope Civic Redirection Fallback
+        # 12. Professional Out-of-Scope Civic Redirection Fallback
         # -------------------------------------------------------------
         return (
             "🏛️ I am the **Pak Civic Pulse AI Assistant**, specialized in municipal services and civic complaint management in Pakistan.\n\n"
